@@ -1,0 +1,254 @@
+{\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang3082{\fonttbl{\f0\fnil\fcharset0 Calibri;}}
+{\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+\pard\sa200\sl276\slmult1\f0\fs22\lang10 #include <ros/ros.h>\par
+#include <opencv2/opencv.hpp>\par
+#include <opencv2/highgui/highgui.hpp>\par
+#include <opencv2/imgproc/imgproc.hpp>\par
+#include <vector>\par
+#include <string>\par
+#include <geometry_msgs/Point.h>\par
+#include <cmath>\par
+#include <map>\par
+\par
+std::string window_original_name = "Original Image";\par
+\par
+// Definir publicadores para cada tipo de figura y color\par
+ros::Publisher square_red_pub[3];\par
+ros::Publisher square_blue_pub[3];\par
+ros::Publisher hexagon_green_pub[2];\par
+ros::Publisher hexagon_yellow_pub[2];\par
+\par
+// Ajustar los rangos de color HSV, especialmente el amarillo\par
+struct ColorRange \{\par
+    cv::Scalar lower;\par
+    cv::Scalar upper;\par
+\};\par
+\par
+// Rango de color HSV para cada color\par
+std::map<std::string, ColorRange> color_ranges = \{\par
+    \{"Rojo", \{cv::Scalar(0, 50, 50), cv::Scalar(10, 255, 255)\}\},\par
+    \{"Verde", \{cv::Scalar(35, 50, 50), cv::Scalar(85, 255, 255)\}\},\par
+    \{"Azul", \{cv::Scalar(100, 50, 50), cv::Scalar(140, 255, 255)\}\},\par
+    \{"Amarillo", \{cv::Scalar(20, 100, 100), cv::Scalar(40, 255, 255)\}\}\par
+\};\par
+\par
+// Par\'e1metros de la c\'e1mara\par
+const double fx = 800;\par
+const double fy = 800;\par
+const double cx_principal = 320;\par
+const double cy_principal = 240;\par
+const double Z = 1.0;  // Distancia constante\par
+\par
+// Par\'e1metros de \'e1rea para evitar detecci\'f3n de ruido\par
+const double MIN_AREA = 1000.0;\par
+const double MAX_AREA = 50000.0;\par
+\par
+bool isSquareOrHexagon(const std::vector<cv::Point>& approx) \{\par
+    if (approx.size() == 4) \{\par
+        double side1 = cv::norm(approx[0] - approx[1]);\par
+        double side2 = cv::norm(approx[1] - approx[2]);\par
+        double aspectRatio = std::max(side1, side2) / std::min(side1, side2);\par
+        return aspectRatio < 1.1;\par
+    \} else if (approx.size() == 6) \{\par
+        return true;\par
+    \}\par
+    return false;\par
+\}\par
+\par
+std::string getShapeName(const std::vector<cv::Point>& approx) \{\par
+    if (approx.size() == 4 && isSquareOrHexagon(approx)) \{\par
+        return "Cuadrado";\par
+    \} \par
+    else if (approx.size() == 6) \{\par
+        return "Hexagono";\par
+    \} \par
+    return "Forma desconocida";\par
+\}\par
+\par
+std::string detectColor(const cv::Mat& frame, const std::vector<cv::Point>& contour) \{\par
+    cv::Rect bounding_box = cv::boundingRect(contour);\par
+    cv::Mat roi = frame(bounding_box);\par
+    cv::Mat roi_hsv;\par
+    cv::cvtColor(roi, roi_hsv, cv::COLOR_BGR2HSV);\par
+\par
+    std::map<std::string, int> color_count;\par
+    for (const auto& color : color_ranges) \{\par
+        cv::Mat mask;\par
+        cv::inRange(roi_hsv, color.second.lower, color.second.upper, mask);\par
+        int count = cv::countNonZero(mask);\par
+        color_count[color.first] = count;\par
+    \}\par
+\par
+    std::string detected_color = "Desconocido";\par
+    int max_count = 0;\par
+    for (const auto& color : color_count) \{\par
+        if (color.second > max_count) \{\par
+            max_count = color.second;\par
+            detected_color = color.first;\par
+        \}\par
+    \}\par
+    return detected_color;\par
+\}\par
+\par
+void preprocessImage(const cv::Mat& img_original, cv::Mat& img_processed) \{\par
+    img_original.convertTo(img_processed, -1, 1.2, 30);\par
+\}\par
+\par
+void morphologicalOperations(cv::Mat& img) \{\par
+    cv::Mat dilated, eroded;\par
+    cv::dilate(img, dilated, cv::Mat(), cv::Point(-1, -1), 2);\par
+    cv::erode(dilated, img, cv::Mat(), cv::Point(-1, -1), 2);\par
+\}\par
+\par
+void processFrame(const cv::Mat& frame) \{\par
+    cv::Mat img_processed;\par
+    preprocessImage(frame, img_processed);\par
+\par
+    cv::Mat gray;\par
+    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);\par
+    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 0);\par
+\par
+    cv::Mat edges;\par
+    cv::Canny(gray, edges, 50, 150);\par
+\par
+    morphologicalOperations(edges);\par
+\par
+    std::vector<std::vector<cv::Point>> contours;\par
+    cv::findContours(edges, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);\par
+\par
+    // Mapas para contar las figuras por forma y color\par
+    std::map<std::string, std::map<std::string, int>> shape_color_count;\par
+    int red_square_count = 0, blue_square_count = 0, green_hexagon_count = 0, yellow_hexagon_count = 0;\par
+\par
+    // Debug: Imprimir cu\'e1ntos contornos se detectaron\par
+    ROS_INFO("Se detectaron %lu contornos", contours.size());\par
+\par
+    for (size_t i = 0; i < contours.size(); i++) \{\par
+        std::vector<cv::Point> approx;\par
+        cv::approxPolyDP(contours[i], approx, 0.02 * cv::arcLength(contours[i], true), true);\par
+\par
+        double area = cv::contourArea(approx);\par
+        if (area < MIN_AREA || area > MAX_AREA || !isSquareOrHexagon(approx)) \{\par
+            continue;\par
+        \}\par
+\par
+        cv::Moments mu = cv::moments(contours[i], false);\par
+        if (mu.m00 != 0) \{\par
+            cv::Point2f centroid(mu.m10 / mu.m00, mu.m01 / mu.m00);\par
+\par
+            double X = (centroid.x - cx_principal) * Z / fx;\par
+            double Y = (centroid.y - cy_principal) * Z / fy;\par
+            double Z_world = Z;\par
+\par
+            // Detectar la forma y el color\par
+            std::string shape = getShapeName(approx);  // Declarar shape aqu\'ed\par
+            std::string color = detectColor(frame, contours[i]);  // Declarar color aqu\'ed\par
+\par
+            // Cambiar la leyenda de "Rojo" a "Amarillo" solo si es un hex\'e1gono rojo\par
+            if (shape == "Hexagono" && color == "Rojo") \{\par
+                color = "Amarillo";\par
+            \}\par
+\par
+            // Publicar en el t\'f3pico correcto basado en la figura y color\par
+            geometry_msgs::Point point_msg;\par
+            point_msg.x = X;\par
+            point_msg.y = Y;\par
+            point_msg.z = Z_world;\par
+\par
+            // Debug: Imprimir informaci\'f3n de cada figura detectada\par
+            ROS_INFO("Figura: %s, Color: %s, Coordenadas: X=%f, Y=%f, Z=%f", shape.c_str(), color.c_str(), X, Y, Z_world);\par
+\par
+            if (shape == "Cuadrado") \{\par
+                if (color == "Rojo" && red_square_count < 3) \{\par
+                    square_red_pub[red_square_count].publish(point_msg);\par
+                    red_square_count++;\par
+                    ROS_INFO("Publicado en: /square_red_%d", red_square_count - 1);\par
+                \} else if (color == "Azul" && blue_square_count < 3) \{\par
+                    square_blue_pub[blue_square_count].publish(point_msg);\par
+                    blue_square_count++;\par
+                    ROS_INFO("Publicado en: /square_blue_%d", blue_square_count - 1);\par
+                \}\par
+            \} else if (shape == "Hexagono") \{\par
+                if (color == "Verde" && green_hexagon_count < 2) \{\par
+                    hexagon_green_pub[green_hexagon_count].publish(point_msg);\par
+                    green_hexagon_count++;\par
+                    ROS_INFO("Publicado en: /hexagon_green_%d", green_hexagon_count - 1);\par
+                \} else if (color == "Amarillo" && yellow_hexagon_count < 2) \{\par
+                    hexagon_yellow_pub[yellow_hexagon_count].publish(point_msg);\par
+                    yellow_hexagon_count++;\par
+                    ROS_INFO("Publicado en: /hexagon_yellow_%d", yellow_hexagon_count - 1);\par
+                \}\par
+            \}\par
+\par
+            // Dibujar el centroide en la imagen\par
+            cv::drawMarker(frame, centroid, cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 20, 2);\par
+\par
+            // Actualizar el conteo de figuras por forma y color\par
+            shape_color_count[shape][color]++;\par
+        \}\par
+    \}\par
+\par
+    // Mostrar la leyenda de conteo de figuras por color en la esquina superior izquierda\par
+    int y_offset = 30;\par
+    for (const auto& shape_entry : shape_color_count) \{\par
+        const std::string& shape = shape_entry.first;\par
+        for (const auto& color_entry : shape_entry.second) \{\par
+            const std::string& color = color_entry.first;\par
+            int count = color_entry.second;\par
+            std::string text = "Forma: " + shape + ", Color: " + color + ", Cantidad: " + std::to_string(count);\par
+            cv::putText(frame, text, cv::Point(10, y_offset), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 1);\par
+            y_offset += 30;\par
+        \}\par
+    \}\par
+\par
+    // Mostrar la imagen original con los centroides\par
+    cv::imshow(window_original_name, frame);\par
+    cv::waitKey(1);\par
+\}\par
+\par
+int main(int argc, char** argv) \{\par
+    ros::init(argc, argv, "vision_final_node");\par
+    ros::NodeHandle nh;\par
+\par
+    // Inicializar publicadores para cada figura\par
+    for (int i = 0; i < 3; i++) \{\par
+        square_red_pub[i] = nh.advertise<geometry_msgs::Point>("square_red_" + std::to_string(i), 10);\par
+        square_blue_pub[i] = nh.advertise<geometry_msgs::Point>("square_blue_" + std::to_string(i), 10);\par
+    \}\par
+    for (int i = 0; i < 2; i++) \{\par
+        hexagon_green_pub[i] = nh.advertise<geometry_msgs::Point>("hexagon_green_" + std::to_string(i), 10);\par
+        hexagon_yellow_pub[i] = nh.advertise<geometry_msgs::Point>("hexagon_yellow_" + std::to_string(i), 10);\par
+    \}\par
+\par
+    cv::namedWindow(window_original_name);\par
+    cv::VideoCapture cap(0, cv::CAP_V4L);\par
+\par
+    if (!cap.isOpened()) \{\par
+        ROS_ERROR("No se pudo abrir la c\'e1mara.");\par
+        return -1;\par
+    \}\par
+    ros::Rate rate(10);  \par
+\par
+    while (ros::ok()) \{\par
+        cv::Mat frame;\par
+        cap >> frame;\par
+\par
+        if (frame.empty()) \{\par
+            ROS_ERROR("Frame vac\'edo.");\par
+            break;\par
+        \}\par
+\par
+        processFrame(frame);\par
+\par
+        ros::spinOnce();\par
+\par
+        // Dormir para mantener la frecuencia\par
+        rate.sleep();\par
+    \}\par
+\par
+    cap.release();\par
+    cv::destroyAllWindows();\par
+\~\~\~\~return\~0;\par
+\}\par
+}
+ 
